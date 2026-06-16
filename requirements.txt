@@ -1,0 +1,5 @@
+# Core needs nothing beyond the Python standard library.
+# Optional, for nicer output:
+Pillow>=9        # makes a white-background signature transparent
+# LibreOffice (the `soffice` binary) is also optional — it bakes the PDF.
+# Without it you still get the .xlsx and can export the PDF yourself.

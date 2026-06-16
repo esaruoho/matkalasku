@@ -1,0 +1,19 @@
+# PRIVATE — never commit personal data
+.env
+.routes.json
+signature.png
+signature*.png
+*-transparent.png
+
+# outputs
+out/
+*.xlsx
+!templates/*.xlsx
+*.pdf
+
+# python
+__pycache__/
+*.pyc
+.venv/
+
+.DS_Store
