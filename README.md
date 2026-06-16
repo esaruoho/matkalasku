@@ -93,6 +93,8 @@ at that form's cells — **no code changes.** If a template has no sidecar, the 
 default (the 2026 layout) is assumed. Note this remaps cells within an `.xlsx`; a wholly
 different *file format* (ODS, PDF form) would need its own filler.
 
+**Full field-by-field explanation of the profile format: [`templates/PROFILE.md`](templates/PROFILE.md).**
+
 ## Dependencies
 
 - **Core**: Python standard library only.
