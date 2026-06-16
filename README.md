@@ -102,6 +102,33 @@ different *file format* (ODS, PDF form) would need its own filler.
   signature transparent; **LibreOffice** (`soffice`) bakes the PDF. Without LibreOffice
   you still get the `.xlsx`.
 
+## Reliability notes (please read before sending real claims)
+
+- **Template self-check.** Before filling, the tool reads a few label cells of the
+  template and checks they match the profile (`A3`≈"Nimi", `C9`≈"Reitti", …). If a
+  template doesn't match its profile it **refuses to fill** rather than put your IBAN in
+  the wrong cell. (`--no-verify` bypasses it; don't, unless you know why.)
+- **Send the PDF, not the .xlsx.** The € totals are spreadsheet formulas. We strip stale
+  caches and set `fullCalcOnLoad`, and LibreOffice recomputes when baking the PDF — so the
+  **PDF is authoritative**. An `.xlsx` opened in an app stuck in manual-calc mode could
+  show a stale number.
+- **Check the rate.** `rates.json` ships `2025=0.59, 2026=0.55`. These are the values used;
+  **verify the official kilometrikorvaus for your year at vero.fi** and update `rates.json`
+  (or pass `--rate`). The tool trusts what's in the file.
+- **`--auto-km` is a hint, not gospel.** It uses public OpenStreetMap/OSRM and routes to a
+  place's *centroid*, so it's usually short of your real route. A distance you state always
+  wins and is remembered; the auto guess never overwrites it.
+- **Tested + CI.** `python -m unittest test_matkalasku` (14 tests); GitHub Actions runs them
+  on every push. PDF baking (LibreOffice) is environment-specific and not covered by CI.
+
+## Architecture
+
+`matkalasku_core.py` is the engine (profile + fill + sign + rates/routes); `matkalasku.py`
+is the thin `.env` front-end; `xlsx_fill.py` is a stdlib surgical `.xlsx` editor. The same
+`matkalasku_core.py` + `xlsx_fill.py` also power [convey](https://github.com/esaruoho/convey)'s
+`convey matkalasku` (which uses a vault profile instead of `.env`) — they're kept
+byte-identical, so a fix in one engine reaches both.
+
 ## Privacy
 
 This tool sends nothing anywhere, except an **optional** anonymous distance lookup

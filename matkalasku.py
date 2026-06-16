@@ -1,17 +1,15 @@
 #!/usr/bin/env python3
 """matkalasku — fill, sign and bake a Finnish travel-expense claim (Matkalasku) as a PDF.
 
-Zero magic: you tell it where you drove (there and back) and on which days; it fills the
-union template, totals km × the year's rate, drops in your signature and today's date,
-and bakes a clean one-page PDF. No cloud, no account — your details live in a local
-`.env` that is gitignored, so nothing personal is ever shared.
+This is the `.env` front-end: it reads your details from a local (gitignored) `.env`,
+asks where/when you drove, and hands off to matkalasku_core (the shared engine). No
+cloud, no account — nothing personal is ever shared.
 
-First run creates a labelled `.env` for you to fill in (name, IBAN, car reg, home city,
-signature). Then: `python matkalasku.py` (interactive) or with flags (see --help).
+First run creates a labelled `.env` for you to fill in. Then: `python matkalasku.py`
+(interactive) or with flags (see --help).
 
-Deps: standard library only for the core. Optional: Pillow (makes a white-background
-signature transparent) and LibreOffice (`soffice`, bakes the PDF — without it you get
-the .xlsx and recompute it yourself).
+Deps: standard library for the core. Optional: Pillow (transparent signature) and
+LibreOffice (`soffice`, bakes the PDF — without it you get the .xlsx).
 """
 from __future__ import annotations
 
@@ -19,11 +17,10 @@ import argparse
 import json
 import re
 import sys
-from dataclasses import dataclass, field
 from datetime import datetime
 from pathlib import Path
 
-import xlsx_fill
+import matkalasku_core as core
 
 REPO = Path(__file__).resolve().parent
 ENV = REPO / ".env"
@@ -31,66 +28,6 @@ RATES = REPO / "rates.json"
 ROUTES = REPO / ".routes.json"
 TEMPLATE = REPO / "templates" / "matkalasku-2026.xlsx"
 OUT_DIR = REPO / "out"
-
-RATE_FALLBACK = 0.55
-DEFAULT_RATES = {"2025": 0.59, "2026": 0.55}
-
-# ── template profiles ──
-# A profile says WHERE each field goes in a given template, so a different .xlsx layout
-# is supported by writing a sidecar `<template>.profile.json` (no code changes). The
-# built-in DEFAULT_PROFILE matches the bundled Virtuaaliassari 2026 template and is used
-# when no sidecar exists. See templates/matkalasku-2026.profile.json for the shape.
-DEFAULT_PROFILE = {
-    "sheet": "Matkalasku 2026",
-    "foreign_sheet": "Ulkomaan päivärahat 2026",   # hidden sheet holding the rate + countries
-    "hide_foreign_sheet": True,
-    "remove_branding": True,            # strip the template-maker's logo + print footer
-    "fit_to_page": True,
-    "name_cell": "B3",
-    "iban_cell": "B5",
-    "invoice_date_cell": "B38",
-    "name_clarify_cells": ["C40", "C67", "C95"],
-    "branding_cells": ["F1", "F2"],
-    "rate_cell": "H5",                  # on foreign_sheet; every km formula references it
-    "print_area": "$A$1:$G$40",
-    "print_area_with_perdiem": "$A$1:$G$67",
-    "km": {
-        "first_row": 10, "last_row": 34,
-        "cols": {"date": "A", "purpose": "B", "route": "C", "reg": "D", "km": "E", "type": "F"},
-        "type_value": "Kilometrikorvaus",
-    },
-    "perdiem": {
-        "first_row": 48, "last_row": 60,
-        "cols": {"span": "A", "kohde": "C", "syy": "E", "type": "F"},
-        "types": {
-            "koko": "Kokopäiväraha",
-            "osa": "Osapäiväraha",
-            "koko-2": "Kokopäiväraha (vähennetty 2 ilmaista ateriaa)",
-            "osa-1": "Osapäiväraha (vähennetty 1 ilmainen ateria)",
-            "ateria": "Ateriakorvaus, kotimaa",
-        },
-    },
-    "signature": {"col": 2, "row": 36, "row_off": 110000, "cx": 1257000, "cy": 330000},
-}
-
-
-def load_template_profile(template: Path) -> dict:
-    """The field-placement profile for a template: its sidecar `<name>.profile.json` if
-    present, else the built-in default (which matches the bundled 2026 template)."""
-    sidecar = template.with_name(template.stem + ".profile.json")
-    if sidecar.exists():
-        try:
-            return json.loads(sidecar.read_text(encoding="utf-8"))
-        except Exception as e:  # noqa: BLE001
-            raise SystemExit(f"matkalasku: bad template profile {sidecar}: {e}")
-    return DEFAULT_PROFILE
-
-
-PLACE_ALIASES = {
-    "kimiö": "Kemiö", "kimio": "Kemiö", "kimito": "Kemiö", "kimitoön": "Kemiö",
-    "kimitoon": "Kemiö", "kemiönsaari": "Kemiö", "kemionsaari": "Kemiö",
-    "kemiö": "Kemiö", "björkboda": "Kemiö", "bjorkboda": "Kemiö",
-}
 
 ENV_TEMPLATE = """\
 # ─────────────────────────────────────────────────────────────────────────────
@@ -119,10 +56,7 @@ SIGNATURE_PATH=signature.png
 """
 
 
-# ── .env: first-run creation + loading ──
-
 def ensure_env() -> bool:
-    """If .env is missing, write a labelled template and return False (caller exits)."""
     if ENV.exists():
         return True
     ENV.write_text(ENV_TEMPLATE, encoding="utf-8")
@@ -144,297 +78,6 @@ def load_env() -> dict:
         cfg[k.strip()] = v.strip()
     return cfg
 
-
-# ── rates (per year, updatable) ──
-
-def load_rates() -> dict:
-    try:
-        rates = json.loads(RATES.read_text(encoding="utf-8"))
-    except Exception:
-        rates = {}
-    if not rates:
-        rates = dict(DEFAULT_RATES)
-        try:
-            RATES.write_text(json.dumps(rates, ensure_ascii=False, indent=2), encoding="utf-8")
-        except Exception:
-            pass
-    return rates
-
-
-def rate_for_year(year):
-    v = load_rates().get(str(year))
-    return float(v) if v is not None else None
-
-
-def save_rate(year, rate):
-    rates = load_rates()
-    rates[str(year)] = round(float(rate), 4)
-    RATES.write_text(json.dumps(rates, ensure_ascii=False, indent=2), encoding="utf-8")
-
-
-def latest_known_rate():
-    rates = load_rates()
-    if not rates:
-        return None
-    newest = max(rates, key=str)
-    return float(rates[newest]), newest
-
-
-# ── routes (remembered distances) ──
-
-def canonical_place(name: str) -> str:
-    return PLACE_ALIASES.get((name or "").strip().lower(), (name or "").strip())
-
-
-def geocode_candidates(name: str) -> list:
-    out, seen = [], set()
-    for n in (name, canonical_place(name)):
-        n = (n or "").strip()
-        if n and n.lower() not in seen:
-            seen.add(n.lower())
-            out.append(n)
-    return out
-
-
-def _route_key(o, d):
-    return f"{canonical_place(o).lower()}|{canonical_place(d).lower()}"
-
-
-def load_routes() -> dict:
-    try:
-        return json.loads(ROUTES.read_text(encoding="utf-8"))
-    except Exception:
-        return {}
-
-
-def lookup_cached_km(o, d):
-    routes = load_routes()
-    for key in (_route_key(o, d), _route_key(d, o)):
-        if key in routes:
-            try:
-                return float(routes[key]["oneway_km"])
-            except Exception:
-                continue
-    return None
-
-
-def remember_route(o, d, oneway_km, source="stated"):
-    routes = load_routes()
-    key = _route_key(o, d)
-    existing = routes.get(key)
-    if existing and source.startswith("auto") and not str(existing.get("source", "")).startswith("auto"):
-        return
-    routes[key] = {"origin": canonical_place(o), "destination": canonical_place(d),
-                   "oneway_km": round(float(oneway_km), 1), "source": source}
-    ROUTES.write_text(json.dumps(routes, ensure_ascii=False, indent=2), encoding="utf-8")
-
-
-def lookup_oneway_km(origin, destination, timeout=8.0):
-    """Best-effort one-way driving km via public Nominatim + OSRM (network, not magic)."""
-    import urllib.parse
-    import urllib.request
-
-    def geocode(place):
-        for cand in geocode_candidates(place):
-            q = cand if "," in cand else f"{cand}, Finland"
-            url = "https://nominatim.openstreetmap.org/search?" + urllib.parse.urlencode(
-                {"q": q, "format": "json", "limit": 1})
-            req = urllib.request.Request(url, headers={"User-Agent": "matkalasku/1.0"})
-            with urllib.request.urlopen(req, timeout=timeout) as r:
-                data = json.loads(r.read().decode("utf-8"))
-            if data:
-                return float(data[0]["lon"]), float(data[0]["lat"])
-        return None
-
-    try:
-        a, b = geocode(origin), geocode(destination)
-        if not a or not b:
-            return None
-        coords = f"{a[0]},{a[1]};{b[0]},{b[1]}"
-        url = f"https://router.project-osrm.org/route/v1/driving/{coords}?overview=false"
-        req = urllib.request.Request(url, headers={"User-Agent": "matkalasku/1.0"})
-        with urllib.request.urlopen(req, timeout=timeout) as r:
-            data = json.loads(r.read().decode("utf-8"))
-        routes = data.get("routes") or []
-        return round(routes[0]["distance"] / 1000.0) if routes else None
-    except Exception:
-        return None
-
-
-# ── small helpers ──
-
-def normalize_date(s: str) -> str:
-    s = s.strip()
-    m = re.match(r"^(\d{4})-(\d{1,2})-(\d{1,2})$", s)
-    if m:
-        y, mo, d = m.groups()
-        return f"{int(d)}.{int(mo)}.{y}"
-    m = re.match(r"^(\d{1,2})\.(\d{1,2})\.(\d{4})$", s)
-    if m:
-        d, mo, y = m.groups()
-        return f"{int(d)}.{int(mo)}.{y}"
-    return s
-
-
-def route_string(origin, destination, round_trip=True):
-    o, d = origin.strip(), destination.strip()
-    return f"{o}–{d}–{o}" if round_trip else f"{o}–{d}"
-
-
-def format_iban(iban: str) -> str:
-    s = re.sub(r"\s+", "", iban or "")
-    return " ".join(s[i:i + 4] for i in range(0, len(s), 4)) if s else ""
-
-
-def prepare_signature(path: Path):
-    """Return a transparent-background PNG path (white→alpha, cached) or None."""
-    if not path or not path.exists():
-        return None
-    out = path.with_name(path.stem + "-transparent.png")
-    try:
-        if not out.exists() or out.stat().st_mtime < path.stat().st_mtime:
-            from PIL import Image
-            im = Image.open(path).convert("RGBA")
-            im.putdata([(r, g, b, 0) if (r > 235 and g > 235 and b > 235) else (r, g, b, a)
-                        for (r, g, b, a) in im.getdata()])
-            im.save(out)
-        return out
-    except Exception:
-        return path
-
-
-def find_soffice():
-    import shutil
-    for cand in ("soffice", "libreoffice",
-                 "/Applications/LibreOffice.app/Contents/MacOS/soffice"):
-        hit = shutil.which(cand) if "/" not in cand else (cand if Path(cand).exists() else None)
-        if hit:
-            return hit
-    return None
-
-
-def to_pdf(xlsx_path, out_dir):
-    import subprocess
-    soffice = find_soffice()
-    if not soffice:
-        return None
-    try:
-        subprocess.run([soffice, "--headless", "--convert-to", "pdf", "--outdir",
-                        str(out_dir), str(xlsx_path)], check=True, capture_output=True, timeout=120)
-    except Exception:
-        return None
-    pdf = Path(out_dir) / (Path(xlsx_path).stem + ".pdf")
-    return pdf if pdf.exists() else None
-
-
-@dataclass
-class Matkalasku:
-    name: str = ""
-    iban: str = ""
-    purpose: str = ""
-    regnr: str = ""
-    origin: str = ""
-    destination: str = ""
-    km_per_leg: float = 0.0
-    dates: list = field(default_factory=list)
-    rate: float = RATE_FALLBACK
-    perdiem: list = field(default_factory=list)
-    invoice_date: str = ""
-
-    @property
-    def total_km(self):
-        return self.km_per_leg * len(self.dates)
-
-    @property
-    def total_eur(self):
-        return round(self.total_km * self.rate, 2)
-
-    @property
-    def route(self):
-        return f"{self.origin.strip()}↔{self.destination.strip()}"
-
-    def leg_route(self, i):
-        return (route_string(self.origin, self.destination, False) if i % 2 == 0
-                else route_string(self.destination, self.origin, False))
-
-    @property
-    def date_span(self):
-        if not self.dates:
-            return ""
-        return self.dates[0] if len(self.dates) == 1 else f"{self.dates[0]}–{self.dates[-1]}"
-
-    def cells(self, p: dict):
-        km = p["km"]
-        kc = km["cols"]
-        first, last = km["first_row"], km["last_row"]
-        max_trips = last - first + 1
-        if len(self.dates) > max_trips:
-            raise ValueError(f"{len(self.dates)} dates exceeds the template's {max_trips} rows")
-        pd = p.get("perdiem") or {}
-        pc = pd.get("cols", {})
-        pfirst, plast = pd.get("first_row"), pd.get("last_row")
-        max_pd = (plast - pfirst + 1) if pfirst else 0
-        if len(self.perdiem) > max_pd:
-            raise ValueError(f"{len(self.perdiem)} per-diem rows exceeds {max_pd}")
-
-        cells = {p["name_cell"]: self.name, p["iban_cell"]: self.iban}
-        if self.invoice_date and p.get("invoice_date_cell"):
-            cells[p["invoice_date_cell"]] = self.invoice_date
-        if self.name:
-            for c in p.get("name_clarify_cells", []):
-                cells[c] = self.name
-        for c in p.get("branding_cells", []):
-            cells[c] = None
-        for r in range(first, last + 1):
-            for col in kc.values():
-                cells[f"{col}{r}"] = None
-        for i, d in enumerate(self.dates):
-            r = first + i
-            cells[f"{kc['date']}{r}"] = d
-            cells[f"{kc['purpose']}{r}"] = self.purpose
-            cells[f"{kc['route']}{r}"] = self.leg_route(i)
-            cells[f"{kc['reg']}{r}"] = self.regnr
-            cells[f"{kc['km']}{r}"] = self.km_per_leg
-            cells[f"{kc['type']}{r}"] = km["type_value"]
-        if pfirst:
-            for r in range(pfirst, plast + 1):
-                for col in pc.values():
-                    cells[f"{col}{r}"] = None
-            for i, laatu in enumerate(self.perdiem):
-                r = pfirst + i
-                cells[f"{pc['span']}{r}"] = self.date_span
-                cells[f"{pc['kohde']}{r}"] = self.destination
-                cells[f"{pc['syy']}{r}"] = self.purpose
-                cells[f"{pc['type']}{r}"] = laatu
-        return cells
-
-
-def fill(data: Matkalasku, out_path, profile: dict, template: Path,
-         signature: Path | None = None) -> Path:
-    p = profile
-    area = p.get("print_area_with_perdiem", p.get("print_area")) if data.perdiem else p.get("print_area")
-    sig = None
-    sig_file = prepare_signature(signature) if signature else None
-    if sig_file and p.get("signature"):
-        s = p["signature"]
-        sig = (str(sig_file), s["col"], s["row"], s["cx"], s["cy"], s.get("row_off", 0))
-    extra = {}
-    if p.get("rate_cell") and p.get("foreign_sheet"):
-        extra = {p["foreign_sheet"]: {p["rate_cell"]: data.rate}}
-    hide = ([p["foreign_sheet"]] if p.get("hide_foreign_sheet") and p.get("foreign_sheet") else None)
-    return xlsx_fill.set_cells(
-        template, out_path, p["sheet"], data.cells(p),
-        hide_sheets=hide,
-        print_area=(p["sheet"], area) if area else None,
-        fit_to_page=p.get("fit_to_page", True),
-        strip_footer=p.get("remove_branding", True),
-        remove_drawing=p.get("remove_branding", True),
-        signature=sig,
-        extra_cells=extra,
-    )
-
-
-# ── CLI ──
 
 def _ask(prompt, default=""):
     suffix = f" [{default}]" if default else ""
@@ -463,6 +106,8 @@ def main(argv=None) -> int:
                     help="TYPE[:COUNT], TYPE ∈ koko|osa|koko-2|osa-1|ateria")
     ap.add_argument("--auto-km", action="store_true", dest="auto_km")
     ap.add_argument("--template", help="path to a Matkalasku .xlsx (default: bundled 2026)")
+    ap.add_argument("--no-verify", action="store_true", dest="no_verify",
+                    help="skip the template/profile self-check (not recommended)")
     ap.add_argument("--out"); ap.add_argument("--no-open", action="store_true", dest="no_open")
     ap.add_argument("--yes", action="store_true")
     args = ap.parse_args(argv)
@@ -475,7 +120,7 @@ def main(argv=None) -> int:
     if not template.exists():
         print(f"matkalasku: template not found: {template}", file=sys.stderr)
         return 1
-    profile = load_template_profile(template)
+    profile = core.load_template_profile(template)
 
     name = args.name or (_ask("Nimi (your name)", cfg.get("NAME", "")) if interactive else cfg.get("NAME", ""))
     iban = args.iban or (_ask("Tilinumero (IBAN)", cfg.get("IBAN", "")) if interactive else cfg.get("IBAN", ""))
@@ -494,12 +139,12 @@ def main(argv=None) -> int:
     if flag_km is not None:
         oneway, route_source = float(flag_km), "stated (flag)"
     else:
-        cached = lookup_cached_km(origin, destination)
+        cached = core.lookup_cached_km(ROUTES, origin, destination)
         auto = None
         if cached is not None:
             print(f"  ↳ remembered route {origin}↔{destination}: {cached:g} km one way")
         if args.auto_km or (interactive and cached is None):
-            auto = lookup_oneway_km(origin, destination)
+            auto = core.lookup_oneway_km(origin, destination)
             if auto:
                 print(f"  ↳ looked up {origin}→{destination}: ~{auto} km one way")
         default = cached if cached is not None else auto
@@ -524,7 +169,7 @@ def main(argv=None) -> int:
             print("matkalasku: a distance is required (--km / --auto-km)", file=sys.stderr)
             return 1
     if oneway and oneway > 0:
-        remember_route(origin, destination, oneway, source=route_source)
+        core.remember_route(ROUTES, origin, destination, oneway, source=route_source)
 
     # dates
     raw_dates = list(args.date or [])
@@ -542,7 +187,7 @@ def main(argv=None) -> int:
     if not raw_dates:
         print("matkalasku: at least one travel date is required (--date)", file=sys.stderr)
         return 1
-    dates = [normalize_date(d) for d in raw_dates]
+    dates = [core.normalize_date(d) for d in raw_dates]
 
     # per-diem (optional)
     perdiem = []
@@ -555,28 +200,29 @@ def main(argv=None) -> int:
     # rate for the travel year (stored, updatable)
     year = dates[0].split(".")[-1]
     if args.rate is not None:
-        rate = float(args.rate); save_rate(year, rate)
+        rate = float(args.rate); core.save_rate(RATES, year, rate)
     else:
-        rate = rate_for_year(year)
+        rate = core.rate_for_year(RATES, year)
         if rate is not None:
             print(f"  ↳ {year} kilometrikorvaus: {rate:g} €/km")
         elif interactive:
-            fb = latest_known_rate()
+            fb = core.latest_known_rate(RATES)
             ans = _ask(f"Vuoden {year} kilometrikorvaus €/km (not on record)", f"{fb[0]:g}" if fb else "")
-            rate = float(ans.replace(",", ".")) if ans else (fb[0] if fb else RATE_FALLBACK)
-            save_rate(year, rate)
+            rate = float(ans.replace(",", ".")) if ans else (fb[0] if fb else core.RATE_FALLBACK)
+            core.save_rate(RATES, year, rate)
             print(f"  ↳ stored {year} = {rate:g} €/km")
         else:
-            fb = latest_known_rate()
-            rate = fb[0] if fb else RATE_FALLBACK
+            fb = core.latest_known_rate(RATES)
+            rate = fb[0] if fb else core.RATE_FALLBACK
             print(f"  ↳ no rate for {year}; using {rate:g} €/km (set with --rate)")
 
     place_label = args.place or (_ask("Paikka / tapahtuma (place/event)", destination) if interactive else destination)
-    invoice_date = normalize_date(args.invoice_date) if args.invoice_date else datetime.now().strftime("%-d.%-m.%Y")
+    invoice_date = core.normalize_date(args.invoice_date) if args.invoice_date else core.fi_date(datetime.now())
 
-    data = Matkalasku(name=name, iban=format_iban(iban) or iban, purpose=purpose, regnr=regnr,
-                      origin=origin, destination=destination, km_per_leg=oneway, dates=dates,
-                      perdiem=perdiem, rate=rate, invoice_date=invoice_date)
+    data = core.Matkalasku(name=name, iban=core.format_iban(iban) or iban, purpose=purpose,
+                           regnr=regnr, origin=origin, destination=destination,
+                           km_per_leg=oneway, dates=dates, perdiem=perdiem, rate=rate,
+                           invoice_date=invoice_date)
 
     handle = cfg.get("HANDLE") or _slug(name, "matkalasku")
     place = _slug(place_label, "matka")
@@ -589,11 +235,11 @@ def main(argv=None) -> int:
     if sig_path and not sig_path.is_absolute():
         sig_path = REPO / sig_path
     try:
-        fill(data, out, profile, template, signature=sig_path)
+        core.fill(data, out, profile, template, signature=sig_path, verify=not args.no_verify)
     except Exception as e:  # noqa: BLE001
-        print(f"matkalasku: could not fill template: {e}", file=sys.stderr)
+        print(f"matkalasku: {e}", file=sys.stderr)
         return 1
-    pdf = to_pdf(out, out.parent)
+    pdf = core.to_pdf(out, out.parent)
     record = {**{k: getattr(data, k) for k in
                  ("name", "iban", "regnr", "purpose", "origin", "destination",
                   "km_per_leg", "dates", "perdiem", "total_km", "rate", "total_eur", "invoice_date")},

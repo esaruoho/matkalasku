@@ -33,6 +33,61 @@ PKG_REL_NS = "http://schemas.openxmlformats.org/package/2006/relationships"
 _COL_RE = re.compile(r"^([A-Z]+)(\d+)$")
 
 
+def read_cell_text(in_path, sheet_name: str, coords) -> dict:
+    """Return {coord: visible text} for the given cells (shared OR inline strings).
+
+    Read-only; used to self-check that a template matches its profile before filling.
+    Numbers/blank cells come back as "" — we only care about label text here.
+    """
+    import html
+    coords = set(coords)
+    with zipfile.ZipFile(in_path) as z:
+        members = {n: z.read(n) for n in z.namelist()}
+    shared = []
+    if "xl/sharedStrings.xml" in members:
+        ss = members["xl/sharedStrings.xml"].decode("utf-8", "replace")
+        for si in re.findall(r"<si>(.*?)</si>", ss, re.S):
+            shared.append(html.unescape("".join(re.findall(r"<t[^>]*>(.*?)</t>", si, re.S))))
+    path = _sheet_path_for(members, sheet_name)
+    xml = members[path].decode("utf-8", "replace")
+    out = {c: "" for c in coords}
+    # match BOTH self-closing (<c r=".."/>) and full (<c r="..">..</c>) cells — otherwise
+    # an empty cell earlier in a row swallows the next real cell up to its </c>
+    for m in re.finditer(r'<c r="([A-Z]+\d+)"([^>]*?)(?:/>|>(.*?)</c>)', xml, re.S):
+        ref, attrs, inner = m.group(1), m.group(2), (m.group(3) or "")
+        if ref not in coords:
+            continue
+        typ = (re.search(r't="([^"]+)"', attrs) or [None, ""])[1] if 't="' in attrs else ""
+        vm = re.search(r"<v>(.*?)</v>", inner, re.S)
+        if typ == "s" and vm:
+            try:
+                out[ref] = shared[int(vm.group(1))]
+            except (IndexError, ValueError):
+                out[ref] = ""
+        elif typ == "inlineStr":
+            out[ref] = html.unescape("".join(re.findall(r"<t[^>]*>(.*?)</t>", inner, re.S)))
+        elif vm:
+            out[ref] = html.unescape(vm.group(1))
+    return out
+
+
+def read_row_heights(in_path, sheet_name: str, rows) -> dict:
+    """Return {row_number: height_in_points} for the given 1-based rows (default 15)."""
+    rows = set(int(r) for r in rows)
+    with zipfile.ZipFile(in_path) as z:
+        members = {n: z.read(n) for n in z.namelist()}
+    path = _sheet_path_for(members, sheet_name)
+    xml = members[path].decode("utf-8", "replace")
+    out = {r: 15.0 for r in rows}
+    for m in re.finditer(r'<row[^>]*r="(\d+)"([^>]*)>', xml):
+        rn = int(m.group(1))
+        if rn in rows:
+            hm = re.search(r'ht="([0-9.]+)"', m.group(2))
+            if hm:
+                out[rn] = float(hm.group(1))
+    return out
+
+
 def col_to_index(col: str) -> int:
     """'A' -> 1, 'B' -> 2, 'AA' -> 27."""
     n = 0
