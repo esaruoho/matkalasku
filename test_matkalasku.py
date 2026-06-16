@@ -72,6 +72,14 @@ class Model(unittest.TestCase):
         self.assertIsNone(c["E12"])
         self.assertIsNone(c["F1"]); self.assertIsNone(c["F2"])  # branding cleared
 
+    def test_prompt_perdiem(self):
+        # decline → no per-diem
+        self.assertEqual(core.prompt_perdiem(lambda p, d="": "e"), [])
+        # accept, then 2 full days + 1 half day, rest zero
+        answers = iter(["k", "2", "1", "0", "0", "0"])
+        got = core.prompt_perdiem(lambda p, d="": next(answers))
+        self.assertEqual(got, ["Kokopäiväraha", "Kokopäiväraha", "Osapäiväraha"])
+
     def test_perdiem_off_by_default_and_fills(self):
         self.assertEqual(core.Matkalasku().perdiem, [])
         m = core.Matkalasku(destination="Kimiö", purpose="K", km_per_leg=189,

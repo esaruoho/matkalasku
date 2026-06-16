@@ -189,13 +189,15 @@ def main(argv=None) -> int:
         return 1
     dates = [core.normalize_date(d) for d in raw_dates]
 
-    # per-diem (optional)
+    # per-diem (optional): flags win; otherwise ask interactively (off by default)
     perdiem = []
     perdiem_types = (profile.get("perdiem") or {}).get("types", {})
     for spec in (args.perdiem or []):
         typ, _, cnt = spec.partition(":")
         nn = int(cnt) if cnt.strip().isdigit() else 1
         perdiem += [perdiem_types.get(typ.strip().lower(), typ.strip())] * nn
+    if not perdiem and interactive:
+        perdiem = core.prompt_perdiem(_ask, perdiem_types)
 
     # rate for the travel year (stored, updatable)
     year = dates[0].split(".")[-1]

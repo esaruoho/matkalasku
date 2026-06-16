@@ -70,6 +70,38 @@ DEFAULT_PROFILE = {
 }
 
 
+# Ordered per-diem prompts: (profile type-key, human label). The label asks a COUNT.
+PERDIEM_PROMPTS = [
+    ("koko", "Kokopäivärahoja (täysi matkavuorokausi, yli 10 h)"),
+    ("osa", "Osapäivärahoja (6–10 h)"),
+    ("koko-2", "Kokopäivärahoja vähennettynä (2 ilmaista ateriaa)"),
+    ("osa-1", "Osapäivärahoja vähennettynä (1 ilmainen ateria)"),
+    ("ateria", "Ateriakorvauksia (alle 6 h, ei päivärahaa)"),
+]
+
+
+def prompt_perdiem(ask, types: dict | None = None) -> list:
+    """Interactively gather per-diem (Kotimaan päivärahat) rows.
+
+    `ask(prompt, default)` is the front-end's input function (so this stays UI-agnostic
+    and shared). Returns a list of the exact F-column type strings (empty = no per-diem).
+    First asks whether per-diem applies at all; only then asks for counts per kind.
+    """
+    types = types or DEFAULT_PROFILE["perdiem"]["types"]
+    yn = ask("Sisältyykö päivärahaa? Any per-diem? (k/e)", "e")
+    if yn.strip().lower() not in ("k", "kyllä", "kylla", "y", "yes", "j", "joo"):
+        return []
+    out = []
+    for key, label in PERDIEM_PROMPTS:
+        raw = ask(f"  {label} – kpl", "0")
+        try:
+            n = max(0, int(raw))
+        except ValueError:
+            n = 0
+        out += [types.get(key, key)] * n
+    return out
+
+
 def load_template_profile(template: Path) -> dict:
     """The profile for a template: its `<name>.profile.json` sidecar, or the default."""
     sidecar = Path(template).with_name(Path(template).stem + ".profile.json")
