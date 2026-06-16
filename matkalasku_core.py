@@ -18,7 +18,12 @@ import re
 from dataclasses import dataclass, field
 from pathlib import Path
 
-import xlsx_fill
+# Works both as a flat module (standalone repo) and as a package submodule (convey),
+# so this file stays byte-identical in both repos.
+try:
+    import xlsx_fill
+except ImportError:  # pragma: no cover - package context
+    from . import xlsx_fill
 
 RATE_FALLBACK = 0.55
 DEFAULT_RATES = {"2025": 0.59, "2026": 0.55}
