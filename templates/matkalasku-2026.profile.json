@@ -1,0 +1,59 @@
+{
+  "sheet": "Matkalasku 2026",
+  "foreign_sheet": "Ulkomaan päivärahat 2026",
+  "hide_foreign_sheet": true,
+  "remove_branding": true,
+  "fit_to_page": true,
+  "name_cell": "B3",
+  "iban_cell": "B5",
+  "invoice_date_cell": "B38",
+  "name_clarify_cells": [
+    "C40",
+    "C67",
+    "C95"
+  ],
+  "branding_cells": [
+    "F1",
+    "F2"
+  ],
+  "rate_cell": "H5",
+  "print_area": "$A$1:$G$40",
+  "print_area_with_perdiem": "$A$1:$G$67",
+  "km": {
+    "first_row": 10,
+    "last_row": 34,
+    "cols": {
+      "date": "A",
+      "purpose": "B",
+      "route": "C",
+      "reg": "D",
+      "km": "E",
+      "type": "F"
+    },
+    "type_value": "Kilometrikorvaus"
+  },
+  "perdiem": {
+    "first_row": 48,
+    "last_row": 60,
+    "cols": {
+      "span": "A",
+      "kohde": "C",
+      "syy": "E",
+      "type": "F"
+    },
+    "types": {
+      "koko": "Kokopäiväraha",
+      "osa": "Osapäiväraha",
+      "koko-2": "Kokopäiväraha (vähennetty 2 ilmaista ateriaa)",
+      "osa-1": "Osapäiväraha (vähennetty 1 ilmainen ateria)",
+      "ateria": "Ateriakorvaus, kotimaa"
+    }
+  },
+  "signature": {
+    "col": 2,
+    "row": 36,
+    "row_off": 110000,
+    "cx": 1257000,
+    "cy": 330000
+  }
+}

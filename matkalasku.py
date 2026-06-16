@@ -32,32 +32,59 @@ ROUTES = REPO / ".routes.json"
 TEMPLATE = REPO / "templates" / "matkalasku-2026.xlsx"
 OUT_DIR = REPO / "out"
 
-# ── the spreadsheet's shape (the bundled 2026 union template) ──
-SHEET = "Matkalasku 2026"
-FOREIGN_SHEET = "Ulkomaan päivärahat 2026"
-PRINT_AREA_KM = "$A$1:$G$40"
-PRINT_AREA_WITH_PERDIEM = "$A$1:$G$67"
-RATE_CELL = "H5"                 # the km-rate cell every row formula references
 RATE_FALLBACK = 0.55
 DEFAULT_RATES = {"2025": 0.59, "2026": 0.55}
-KM_TYPE = "Kilometrikorvaus"
-FIRST_ROW, LAST_ROW = 10, 34
-MAX_TRIPS = LAST_ROW - FIRST_ROW + 1
-PERDIEM_FIRST_ROW, PERDIEM_LAST_ROW = 48, 60
-MAX_PERDIEM = PERDIEM_LAST_ROW - PERDIEM_FIRST_ROW + 1
-PERDIEM_TYPES = {
-    "koko": "Kokopäiväraha",
-    "osa": "Osapäiväraha",
-    "koko-2": "Kokopäiväraha (vähennetty 2 ilmaista ateriaa)",
-    "osa-1": "Osapäiväraha (vähennetty 1 ilmainen ateria)",
-    "ateria": "Ateriakorvaus, kotimaa",
+
+# ── template profiles ──
+# A profile says WHERE each field goes in a given template, so a different .xlsx layout
+# is supported by writing a sidecar `<template>.profile.json` (no code changes). The
+# built-in DEFAULT_PROFILE matches the bundled Virtuaaliassari 2026 template and is used
+# when no sidecar exists. See templates/matkalasku-2026.profile.json for the shape.
+DEFAULT_PROFILE = {
+    "sheet": "Matkalasku 2026",
+    "foreign_sheet": "Ulkomaan päivärahat 2026",   # hidden sheet holding the rate + countries
+    "hide_foreign_sheet": True,
+    "remove_branding": True,            # strip the template-maker's logo + print footer
+    "fit_to_page": True,
+    "name_cell": "B3",
+    "iban_cell": "B5",
+    "invoice_date_cell": "B38",
+    "name_clarify_cells": ["C40", "C67", "C95"],
+    "branding_cells": ["F1", "F2"],
+    "rate_cell": "H5",                  # on foreign_sheet; every km formula references it
+    "print_area": "$A$1:$G$40",
+    "print_area_with_perdiem": "$A$1:$G$67",
+    "km": {
+        "first_row": 10, "last_row": 34,
+        "cols": {"date": "A", "purpose": "B", "route": "C", "reg": "D", "km": "E", "type": "F"},
+        "type_value": "Kilometrikorvaus",
+    },
+    "perdiem": {
+        "first_row": 48, "last_row": 60,
+        "cols": {"span": "A", "kohde": "C", "syy": "E", "type": "F"},
+        "types": {
+            "koko": "Kokopäiväraha",
+            "osa": "Osapäiväraha",
+            "koko-2": "Kokopäiväraha (vähennetty 2 ilmaista ateriaa)",
+            "osa-1": "Osapäiväraha (vähennetty 1 ilmainen ateria)",
+            "ateria": "Ateriakorvaus, kotimaa",
+        },
+    },
+    "signature": {"col": 2, "row": 36, "row_off": 110000, "cx": 1257000, "cy": 330000},
 }
-CELL_NAME, CELL_IBAN = "B3", "B5"
-CELL_INVOICE_DATE = "B38"
-CELL_NAME_CLARIFY = ("C40", "C67", "C95")
-BRANDING_CELLS = ("F1", "F2")
-SIG_ANCHOR_COL, SIG_ANCHOR_ROW, SIG_ROW_OFF = 2, 36, 110000
-SIG_CY, SIG_CX = 330000, 1257000
+
+
+def load_template_profile(template: Path) -> dict:
+    """The field-placement profile for a template: its sidecar `<name>.profile.json` if
+    present, else the built-in default (which matches the bundled 2026 template)."""
+    sidecar = template.with_name(template.stem + ".profile.json")
+    if sidecar.exists():
+        try:
+            return json.loads(sidecar.read_text(encoding="utf-8"))
+        except Exception as e:  # noqa: BLE001
+            raise SystemExit(f"matkalasku: bad template profile {sidecar}: {e}")
+    return DEFAULT_PROFILE
+
 
 PLACE_ALIASES = {
     "kimiö": "Kemiö", "kimio": "Kemiö", "kimito": "Kemiö", "kimitoön": "Kemiö",
@@ -336,53 +363,74 @@ class Matkalasku:
             return ""
         return self.dates[0] if len(self.dates) == 1 else f"{self.dates[0]}–{self.dates[-1]}"
 
-    def cells(self):
-        if len(self.dates) > MAX_TRIPS:
-            raise ValueError(f"{len(self.dates)} dates exceeds the template's {MAX_TRIPS} rows")
-        if len(self.perdiem) > MAX_PERDIEM:
-            raise ValueError(f"{len(self.perdiem)} per-diem rows exceeds {MAX_PERDIEM}")
-        cells = {CELL_NAME: self.name, CELL_IBAN: self.iban}
-        if self.invoice_date:
-            cells[CELL_INVOICE_DATE] = self.invoice_date
+    def cells(self, p: dict):
+        km = p["km"]
+        kc = km["cols"]
+        first, last = km["first_row"], km["last_row"]
+        max_trips = last - first + 1
+        if len(self.dates) > max_trips:
+            raise ValueError(f"{len(self.dates)} dates exceeds the template's {max_trips} rows")
+        pd = p.get("perdiem") or {}
+        pc = pd.get("cols", {})
+        pfirst, plast = pd.get("first_row"), pd.get("last_row")
+        max_pd = (plast - pfirst + 1) if pfirst else 0
+        if len(self.perdiem) > max_pd:
+            raise ValueError(f"{len(self.perdiem)} per-diem rows exceeds {max_pd}")
+
+        cells = {p["name_cell"]: self.name, p["iban_cell"]: self.iban}
+        if self.invoice_date and p.get("invoice_date_cell"):
+            cells[p["invoice_date_cell"]] = self.invoice_date
         if self.name:
-            for c in CELL_NAME_CLARIFY:
+            for c in p.get("name_clarify_cells", []):
                 cells[c] = self.name
-        for c in BRANDING_CELLS:
+        for c in p.get("branding_cells", []):
             cells[c] = None
-        for r in range(FIRST_ROW, LAST_ROW + 1):
-            for col in "ABCDEF":
+        for r in range(first, last + 1):
+            for col in kc.values():
                 cells[f"{col}{r}"] = None
         for i, d in enumerate(self.dates):
-            r = FIRST_ROW + i
-            cells[f"A{r}"] = d
-            cells[f"B{r}"] = self.purpose
-            cells[f"C{r}"] = self.leg_route(i)
-            cells[f"D{r}"] = self.regnr
-            cells[f"E{r}"] = self.km_per_leg
-            cells[f"F{r}"] = KM_TYPE
-        for r in range(PERDIEM_FIRST_ROW, PERDIEM_LAST_ROW + 1):
-            for col in ("A", "C", "E", "F"):
-                cells[f"{col}{r}"] = None
-        for i, laatu in enumerate(self.perdiem):
-            r = PERDIEM_FIRST_ROW + i
-            cells[f"A{r}"] = self.date_span
-            cells[f"C{r}"] = self.destination
-            cells[f"E{r}"] = self.purpose
-            cells[f"F{r}"] = laatu
+            r = first + i
+            cells[f"{kc['date']}{r}"] = d
+            cells[f"{kc['purpose']}{r}"] = self.purpose
+            cells[f"{kc['route']}{r}"] = self.leg_route(i)
+            cells[f"{kc['reg']}{r}"] = self.regnr
+            cells[f"{kc['km']}{r}"] = self.km_per_leg
+            cells[f"{kc['type']}{r}"] = km["type_value"]
+        if pfirst:
+            for r in range(pfirst, plast + 1):
+                for col in pc.values():
+                    cells[f"{col}{r}"] = None
+            for i, laatu in enumerate(self.perdiem):
+                r = pfirst + i
+                cells[f"{pc['span']}{r}"] = self.date_span
+                cells[f"{pc['kohde']}{r}"] = self.destination
+                cells[f"{pc['syy']}{r}"] = self.purpose
+                cells[f"{pc['type']}{r}"] = laatu
         return cells
 
 
-def fill(data: Matkalasku, out_path, signature: Path | None = None) -> Path:
-    area = PRINT_AREA_WITH_PERDIEM if data.perdiem else PRINT_AREA_KM
+def fill(data: Matkalasku, out_path, profile: dict, template: Path,
+         signature: Path | None = None) -> Path:
+    p = profile
+    area = p.get("print_area_with_perdiem", p.get("print_area")) if data.perdiem else p.get("print_area")
     sig = None
     sig_file = prepare_signature(signature) if signature else None
-    if sig_file:
-        sig = (str(sig_file), SIG_ANCHOR_COL, SIG_ANCHOR_ROW, SIG_CX, SIG_CY, SIG_ROW_OFF)
+    if sig_file and p.get("signature"):
+        s = p["signature"]
+        sig = (str(sig_file), s["col"], s["row"], s["cx"], s["cy"], s.get("row_off", 0))
+    extra = {}
+    if p.get("rate_cell") and p.get("foreign_sheet"):
+        extra = {p["foreign_sheet"]: {p["rate_cell"]: data.rate}}
+    hide = ([p["foreign_sheet"]] if p.get("hide_foreign_sheet") and p.get("foreign_sheet") else None)
     return xlsx_fill.set_cells(
-        TEMPLATE, out_path, SHEET, data.cells(),
-        hide_sheets=[FOREIGN_SHEET], print_area=(SHEET, area),
-        fit_to_page=True, strip_footer=True, remove_drawing=True, signature=sig,
-        extra_cells={FOREIGN_SHEET: {RATE_CELL: data.rate}},
+        template, out_path, p["sheet"], data.cells(p),
+        hide_sheets=hide,
+        print_area=(p["sheet"], area) if area else None,
+        fit_to_page=p.get("fit_to_page", True),
+        strip_footer=p.get("remove_branding", True),
+        remove_drawing=p.get("remove_branding", True),
+        signature=sig,
+        extra_cells=extra,
     )
 
 
@@ -414,6 +462,7 @@ def main(argv=None) -> int:
     ap.add_argument("--perdiem", action="append",
                     help="TYPE[:COUNT], TYPE ∈ koko|osa|koko-2|osa-1|ateria")
     ap.add_argument("--auto-km", action="store_true", dest="auto_km")
+    ap.add_argument("--template", help="path to a Matkalasku .xlsx (default: bundled 2026)")
     ap.add_argument("--out"); ap.add_argument("--no-open", action="store_true", dest="no_open")
     ap.add_argument("--yes", action="store_true")
     args = ap.parse_args(argv)
@@ -422,6 +471,11 @@ def main(argv=None) -> int:
         return 0
     cfg = load_env()
     interactive = sys.stdin.isatty() and not args.yes
+    template = Path(args.template) if args.template else TEMPLATE
+    if not template.exists():
+        print(f"matkalasku: template not found: {template}", file=sys.stderr)
+        return 1
+    profile = load_template_profile(template)
 
     name = args.name or (_ask("Nimi (your name)", cfg.get("NAME", "")) if interactive else cfg.get("NAME", ""))
     iban = args.iban or (_ask("Tilinumero (IBAN)", cfg.get("IBAN", "")) if interactive else cfg.get("IBAN", ""))
@@ -492,10 +546,11 @@ def main(argv=None) -> int:
 
     # per-diem (optional)
     perdiem = []
+    perdiem_types = (profile.get("perdiem") or {}).get("types", {})
     for spec in (args.perdiem or []):
         typ, _, cnt = spec.partition(":")
         nn = int(cnt) if cnt.strip().isdigit() else 1
-        perdiem += [PERDIEM_TYPES.get(typ.strip().lower(), typ.strip())] * nn
+        perdiem += [perdiem_types.get(typ.strip().lower(), typ.strip())] * nn
 
     # rate for the travel year (stored, updatable)
     year = dates[0].split(".")[-1]
@@ -534,7 +589,7 @@ def main(argv=None) -> int:
     if sig_path and not sig_path.is_absolute():
         sig_path = REPO / sig_path
     try:
-        fill(data, out, signature=sig_path)
+        fill(data, out, profile, template, signature=sig_path)
     except Exception as e:  # noqa: BLE001
         print(f"matkalasku: could not fill template: {e}", file=sys.stderr)
         return 1

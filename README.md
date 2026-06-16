@@ -60,6 +60,39 @@ python3 matkalasku.py --to Kemiö --place "Synthcamp 2026" \
 #       --invoice-date --out --no-open
 ```
 
+## Using a different template
+
+The tool isn't hardwired to one spreadsheet — it reads a **template profile** that says
+*where each field goes*. Each `.xlsx` may have a sidecar `<name>.profile.json`; the
+bundled one ships at `templates/matkalasku-2026.profile.json`:
+
+```json
+{
+  "sheet": "Matkalasku 2026",
+  "name_cell": "B3", "iban_cell": "B5", "invoice_date_cell": "B38",
+  "km": { "first_row": 10, "last_row": 34,
+          "cols": {"date":"A","purpose":"B","route":"C","reg":"D","km":"E","type":"F"},
+          "type_value": "Kilometrikorvaus" },
+  "rate_cell": "H5", "foreign_sheet": "Ulkomaan päivärahat 2026",
+  "print_area": "$A$1:$G$40", "print_area_with_perdiem": "$A$1:$G$67",
+  "signature": {"col":2,"row":36,"row_off":110000,"cx":1257000,"cy":330000},
+  "branding_cells": ["F1","F2"], "remove_branding": true,
+  "perdiem": { "first_row": 48, "last_row": 60,
+               "cols": {"span":"A","kohde":"C","syy":"E","type":"F"}, "types": {...} }
+}
+```
+
+To use another form (a 2027 layout, a different union's template, anything):
+
+```bash
+python3 matkalasku.py --template templates/my-form.xlsx ...
+```
+
+Drop `my-form.xlsx` in `templates/` and write `my-form.profile.json` beside it pointing
+at that form's cells — **no code changes.** If a template has no sidecar, the built-in
+default (the 2026 layout) is assumed. Note this remaps cells within an `.xlsx`; a wholly
+different *file format* (ODS, PDF form) would need its own filler.
+
 ## Dependencies
 
 - **Core**: Python standard library only.
